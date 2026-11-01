@@ -1,0 +1,684 @@
+{
+  "name": "Nudge - Fireflies + Manual Chat Test to Reviewed Tasks - True Version",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nudge-fireflies-transcribed",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0c1383ee-3231-4076-ad54-b2af4a3dbf7a",
+      "name": "Fireflies Transcription Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        1232,
+        160
+      ],
+      "webhookId": "6fbad2b3-1fd9-468c-a78c-e9a38c562505",
+      "notes": "Configure the Production URL in Fireflies Webhooks and subscribe to Meeting Transcribed. Inspect the actual webhook payload before relying on field names."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and normalize Fireflies webhook event.\nconst body = $json.body ?? $json;\nconst meetingId = body.meetingId ?? body.meeting_id ?? body.transcriptId ?? body.transcript_id;\nconst eventType = body.eventType ?? body.event ?? '';\nif (typeof meetingId !== 'string' || !meetingId.trim()) {\n  throw new Error('Fireflies webhook did not include meetingId/meeting_id. Inspect the actual webhook payload.');\n}\nconst normalizedEvent = String(eventType).toLowerCase();\nif (normalizedEvent && !(normalizedEvent.includes('transcrib') || normalizedEvent.includes('summar'))) {\n  return [{ json: { ignored: true, meetingId, eventType } }];\n}\nreturn [{ json: {\n  ignored: false,\n  meetingId: meetingId.trim(),\n  eventType: eventType || 'unspecified',\n  clientReferenceId: body.clientReferenceId ?? body.client_reference_id ?? '',\n  webhookTimestamp: body.timestamp ?? null,\n  receivedAt: new Date().toISOString(),\n  meetingDate: body.meetingDate ?? body.meeting_date ?? ''\n} }];"
+      },
+      "id": "dc6c1ec4-46ee-4f2f-bf2d-683d125f6018",
+      "name": "Validate Fireflies Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e21ba6d1-724c-4c66-b2bc-0de9b788a82d",
+              "leftValue": "={{ $json.ignored }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "82662633-17f6-49e7-85dd-171017f8697b",
+      "name": "Relevant Fireflies Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1712,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'ignored', message: 'Event was not a transcription or summary completion event.' } }}",
+        "options": {}
+      },
+      "id": "72227baf-ef2a-47c0-b1e4-666e0ff0de87",
+      "name": "Respond - Ignored Event",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1952,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpTemplatedCustomAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { query: 'query Transcript($transcriptId: String!) { transcript(id: $transcriptId) { title id sentences { speaker_name text start_time end_time } summary { overview action_items } } }', variables: { transcriptId: $('Validate Fireflies Event').first().json.meetingId } } }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "03503f5c-e2e0-4afe-ba04-f7570c33ac87",
+      "name": "Get Full Transcript from Fireflies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1952,
+        288
+      ],
+      "credentials": {
+        "httpTemplatedCustomAuth": {
+          "id": "Fp3fwaaiZu7bEHdJ",
+          "name": "Fireflies API Key (Ghaled)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shared normalizer for Fireflies and the manual chat test trigger.\nconst payload = $json;\n\nif (payload.data?.transcript) {\n  if (Array.isArray(payload.errors) && payload.errors.length) {\n    throw new Error('Fireflies GraphQL error: ' + payload.errors.map(e => e.message).join('; '));\n  }\n  const transcript = payload.data.transcript;\n  if (!Array.isArray(transcript.sentences)) {\n    throw new Error('Fireflies response has no transcript.sentences. Check transcript ID and API permissions.');\n  }\n  const sentences = transcript.sentences.filter(s => typeof s.text === 'string' && s.text.trim());\n  const transcriptText = sentences.map(s => `${s.speaker_name || 'Speaker'}: ${s.text.trim()}`).join('\\n');\n  if (transcriptText.trim().length < 20) throw new Error('Retrieved transcript is empty or too short to analyse.');\n  const event = $('Validate Fireflies Event').first().json;\n  return [{ json: {\n    meetingId: transcript.id || event.meetingId,\n    transcriptId: transcript.id || event.meetingId,\n    meetingTitle: transcript.title || 'Untitled meeting',\n    meetingDate: event.meetingDate || 'Unknown',\n    transcript: transcriptText,\n    source: 'Fireflies',\n    summaryOverview: transcript.summary?.overview || '',\n    firefliesActionItems: transcript.summary?.action_items || '',\n    receivedAt: event.receivedAt,\n    clientReferenceId: event.clientReferenceId || ''\n  }}];\n}\n\n// Manual chat test path.\nconst chatText = payload.chatInput ?? payload.text ?? payload.message;\nif (typeof chatText !== 'string' || chatText.trim().length < 20) {\n  throw new Error('For a manual test, send a chat message containing the meeting transcript (at least 20 characters).');\n}\nconst now = new Date();\nconst manualId = `manual-${now.getTime()}`;\nreturn [{ json: {\n  meetingId: manualId,\n  transcriptId: manualId,\n  meetingTitle: 'Manual Chat Test',\n  meetingDate: now.toISOString(),\n  transcript: chatText.trim(),\n  source: 'Manual Chat Test',\n  summaryOverview: '',\n  firefliesActionItems: '',\n  receivedAt: now.toISOString(),\n  clientReferenceId: ''\n}}];"
+      },
+      "id": "0523f015-ac7e-46c8-a951-30878538537d",
+      "name": "Normalize Meeting Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2192,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'gpt-4.1-mini', temperature: 0.1, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are Nudge, a careful meeting-to-task extraction assistant. Extract only concrete commitments explicitly supported by the transcript. Do not turn general discussion, ideas, or suggestions into commitments. Never invent an owner, deadline, priority, or effort. Use empty strings when unknown. Resolve relative dates only when meetingDate is known and unambiguous. Include a short direct evidence excerpt for every task. If there are no actionable tasks, return an empty tasks array. Return valid JSON only with this shape: {\\\"meetingSummary\\\":\\\"string\\\",\\\"tasks\\\":[{\\\"title\\\":\\\"string\\\",\\\"description\\\":\\\"string\\\",\\\"owner\\\":\\\"string\\\",\\\"dueDate\\\":\\\"YYYY-MM-DD or empty string\\\",\\\"priority\\\":\\\"Low|Medium|High|Unknown\\\",\\\"estimatedEffort\\\":\\\"string or Unknown\\\",\\\"commitmentEvidence\\\":\\\"short verbatim excerpt\\\",\\\"confidence\\\":\\\"High|Medium|Low\\\"}]}. Confidence describes extraction certainty, not task importance.' }, { role: 'user', content: `Meeting title: ${$json.meetingTitle}\\nMeeting date: ${$json.meetingDate}\\nMeeting ID: ${$json.meetingId}\\Meeting summary/action items (context only; verify against transcript): ${JSON.stringify({ overview: $json.summaryOverview, action_items: $json.firefliesActionItems })}\\n\\nTranscript:\\n${$json.transcript}` } ] } }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "86848740-cfa4-4c0a-b6fe-23ce840b2800",
+      "name": "Extract Action Items with AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2432,
+        288
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "gM0cEV6cQfRm8qvc",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI output, validate fields, and create one row per task.\nconst content = $json.choices?.[0]?.message?.content;\nif (!content) throw new Error('AI response did not contain choices[0].message.content.');\nlet parsed;\ntry { parsed = JSON.parse(content); } catch (e) { throw new Error('AI returned invalid JSON: ' + e.message); }\nif (!Array.isArray(parsed.tasks)) throw new Error('AI response is missing the tasks array.');\nconst source = $('Normalize Retell Input').isExecuted ? $('Normalize Retell Input').first().json : $('Normalize Meeting Input').first().json;\nif (parsed.tasks.length === 0) return [{ json: {\n  noTasksFound: true,\n  meetingId: source.meetingId,\n  meetingTitle: source.meetingTitle,\n  meetingSummary: parsed.meetingSummary || 'No actionable tasks identified.'\n} }];\nreturn parsed.tasks.map((task, index) => {\n  const title = String(task.title || '').trim();\n  const evidence = String(task.commitmentEvidence || '').trim();\n  if (!title || !evidence) throw new Error(`Task ${index + 1} is missing a title or evidence excerpt; refusing to add unsupported task.`);\n  const priority = ['Low', 'Medium', 'High', 'Unknown'].includes(task.priority) ? task.priority : 'Unknown';\n  const confidence = ['High', 'Medium', 'Low'].includes(task.confidence) ? task.confidence : 'Low';\n  const dueDate = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(task.dueDate || '')) ? task.dueDate : '';\n  return { json: {\n    noTasksFound: false,\n    taskId: `${source.meetingId}-${index + 1}`,\n    meetingId: source.meetingId,\n    meetingTitle: source.meetingTitle,\n    meetingDate: source.meetingDate,\n    transcriptId: source.transcriptId,\n    transcriptSource: source.source || 'Unknown',\n    meetingSummary: parsed.meetingSummary || '',\n    title,\n    description: String(task.description || ''),\n    owner: String(task.owner || ''),\n    dueDate,\n    priority,\n    estimatedEffort: String(task.estimatedEffort || 'Unknown'),\n    commitmentEvidence: evidence,\n    confidence,\n    reviewStatus: 'Pending Review',\n    taskStatus: 'Not Started',\n    reviewNotes: '',\n    createdAt: new Date().toISOString()\n  }};\n});"
+      },
+      "id": "ccf95f96-bc71-45ad-b153-abe7df560630",
+      "name": "Prepare Review Queue Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "ff4a8329-a90e-4d7e-b210-4dbb527efab5",
+              "leftValue": "={{ $json.noTasksFound }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "77a95cfc-682c-481e-bbc9-c05e13864e0b",
+      "name": "Any Tasks Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2912,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'processed', message: 'No actionable tasks were found in this transcript.' } }}",
+        "options": {}
+      },
+      "id": "28ddf89f-a33f-4a54-a2ca-2d0f4e0a12a1",
+      "name": "Respond - No Tasks",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3152,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po",
+          "mode": "list",
+          "cachedResultName": "Task Manager",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Tasks",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Task ID": "={{ $json.taskId }}",
+            "Meeting ID": "={{ $json.meetingId }}",
+            "Meeting Title": "={{ $json.meetingTitle }}",
+            "Meeting Date": "={{ $json.meetingDate }}",
+            "Transcript ID": "={{ $json.transcriptId }}",
+            "Source": "={{ $json.transcriptSource }}",
+            "Task": "={{ $json.title }}",
+            "Description": "={{ $json.description }}",
+            "Owner": "={{ $json.owner }}",
+            "Due Date": "={{ $json.dueDate }}",
+            "Priority": "={{ $json.priority }}",
+            "Estimated Effort": "={{ $json.estimatedEffort }}",
+            "Evidence": "={{ $json.commitmentEvidence }}",
+            "AI Confidence": "={{ $json.confidence }}",
+            "Review Status": "={{ $json.reviewStatus }}",
+            "Task Status": "={{ $json.taskStatus }}",
+            "Review Notes": "={{ $json.reviewNotes }}",
+            "Created At": "={{ $json.createdAt }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Task ID",
+              "displayName": "Task ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Meeting ID",
+              "displayName": "Meeting ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Meeting Title",
+              "displayName": "Meeting Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Meeting Date",
+              "displayName": "Meeting Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Transcript ID",
+              "displayName": "Transcript ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Task",
+              "displayName": "Task",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Owner",
+              "displayName": "Owner",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Priority",
+              "displayName": "Priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Estimated Effort",
+              "displayName": "Estimated Effort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Evidence",
+              "displayName": "Evidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "AI Confidence",
+              "displayName": "AI Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Review Status",
+              "displayName": "Review Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Task Status",
+              "displayName": "Task Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Review Notes",
+              "displayName": "Review Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Created At",
+              "displayName": "Created At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "id": "f1910341-5a05-4a6e-86c1-3e172c6404fd",
+      "name": "Append Pending Tasks to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        3136,
+        544
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "5SJJhnHu3LTOkRdj",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Target tab: Tasks. Uses 18 columns. Refresh/reselect sheet columns in n8n after import if the cached schema is stale."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mark meeting processed only after the Google Sheets append succeeded.\nconst rows = $input.all();\nconst store = $getWorkflowStaticData('global');\nstore.processedMeetings = store.processedMeetings || {};\nconst meetingId = $('Prepare Review Queue Rows').first().json.meetingId;\nstore.processedMeetings[meetingId] = { processedAt: new Date().toISOString() };\nreturn rows;"
+      },
+      "id": "fc4b5108-56db-403e-86c4-065adf7a5d9d",
+      "name": "Mark Meeting Processed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3376,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "aagemailtester@gmail.com",
+        "subject": "Nudge: Meeting tasks are ready for review",
+        "emailType": "text",
+        "message": "=Nudge extracted a task from the meeting: {{ $('Prepare Review Queue Rows').item.json.meetingTitle }}\n\nTask: {{ $('Prepare Review Queue Rows').item.json.title }}\nOwner (if stated): {{ $('Prepare Review Queue Rows').item.json.owner || 'Not specified — please assign' }}\nDue date (if stated): {{ $('Prepare Review Queue Rows').item.json.dueDate || 'Not specified — please confirm' }}\nPriority: {{ $('Prepare Review Queue Rows').item.json.priority }}\nEstimated effort: {{ $('Prepare Review Queue Rows').item.json.estimatedEffort }}\nAI confidence: {{ $('Prepare Review Queue Rows').item.json.confidence }}\nEvidence: {{ $('Prepare Review Queue Rows').item.json.commitmentEvidence }}\n\nReview Status: Pending Review\nTask Status: Not Started\n\nPlease review the extracted task in the Nudge Google Sheet. Verify the task, evidence, owner, due date and priority. Correct inaccurate or incomplete information before changing Review Status to Approved or Rejected.\n\nApproval does not mean work has started. Update Task Status separately when work actually begins.",
+        "options": {}
+      },
+      "id": "652fecd4-b039-44f0-aa50-980ea45a95ef",
+      "name": "Email Reviewer - Approval Needed",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3616,
+        544
+      ],
+      "webhookId": "32260b19-af08-4f8f-8b98-871d660c3a4d",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "vWCaq2cH5enEW1Nm",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'queued_for_review', message: 'Transcript retrieved and extracted tasks were added to the Pending Review queue.' } }}",
+        "options": {}
+      },
+      "id": "83f93cd1-329f-4f5e-9c47-40738487b935",
+      "name": "Respond - Tasks Queued",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3824,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "41a0bf19-a484-4289-8462-03c3a93bd20c",
+      "name": "Manual Chat Test Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        1952,
+        512
+      ],
+      "webhookId": "93f76dc2-0803-4de1-8c00-eeeee879224f"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Fireflies Transcription Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Fireflies Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Fireflies Event": {
+      "main": [
+        [
+          {
+            "node": "Relevant Fireflies Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Relevant Fireflies Event?": {
+      "main": [
+        [
+          {
+            "node": "Respond - Ignored Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Full Transcript from Fireflies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full Transcript from Fireflies": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meeting Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Meeting Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Action Items with AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Action Items with AI": {
+      "main": [
+        [
+          {
+            "node": "Prepare Review Queue Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Review Queue Rows": {
+      "main": [
+        [
+          {
+            "node": "Any Tasks Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Tasks Found?": {
+      "main": [
+        [
+          {
+            "node": "Respond - No Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Append Pending Tasks to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Pending Tasks to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Mark Meeting Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Meeting Processed": {
+      "main": [
+        [
+          {
+            "node": "Email Reviewer - Approval Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Reviewer - Approval Needed": {
+      "main": [
+        [
+          {
+            "node": "Respond - Tasks Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Chat Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Meeting Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "aca172e9-4a5a-4089-8c7e-656c7b468993",
+  "meta": {
+    "instanceId": "be5a9edf7a3f393dcef3472ba5e964923ac478fc2e303d7b93c56f1184f332a0"
+  },
+  "nodeGroups": [],
+  "id": "NRpGVLLaELH1kJFH",
+  "tags": []
+}
