@@ -1,0 +1,1055 @@
+{
+  "name": "Nudge | Retell voice agent backend",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nudge/get-projects",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "07622916-7019-4b6e-9f57-d2882372ccc2",
+      "name": "Webhook get_projects",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        128
+      ],
+      "webhookId": "379018ce-9d53-4a77-8295-61f34b5cf683"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "projects"
+        },
+        "options": {}
+      },
+      "id": "6b686e53-1879-434c-9baa-71afb13539aa",
+      "name": "Read projects (get_projects)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -240,
+        128
+      ],
+      "alwaysOutputData": false,
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IAgscZZW3TS2D590",
+          "name": "Google Sheets account 2"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sheet rows -> { projects:[{project_id,name,active}] }. Tolerant of header naming.\nconst pick = (row, keys) => { for (const k of Object.keys(row)) if (keys.includes(k.trim().toLowerCase())) return row[k]; };\nconst ID = ['project id', 'project_id', 'projectid', 'id'];\nconst NAME = ['project name', 'project_name', 'project', 'name'];\nconst STATUS = ['status', 'active', 'state'];\nconst seen = new Set(), projects = [];\nfor (const { json: row } of $input.all()) {\n  const name = String(pick(row || {}, NAME) ?? '').trim();\n  if (!name) continue;\n  const project_id = String(pick(row, ID) ?? '').trim() || name;\n  const status = String(pick(row, STATUS) ?? 'active').trim().toLowerCase();\n  const active = !['completed', 'cancelled', 'canceled', 'inactive', 'archived', 'closed', 'done', 'false', 'no', '0'].includes(status);\n  const key = project_id.toLowerCase(); if (seen.has(key)) continue; seen.add(key);\n  projects.push({ project_id, name, active });\n}\nreturn [{ json: { projects } }];\n"
+      },
+      "id": "ef5b33a0-2bdc-4f77-8020-0bbf51b22582",
+      "name": "Normalize projects (get_projects)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst hash = str => { let h1 = 0xdeadbeef, h2 = 0x41c6ce57;\n  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i);\n    h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0'); };\n// Dice similarity on bigrams: tolerant of misheard names (\"cue four campaign\").\nconst dice = (a, b) => { a = norm(a).replace(/ /g, ''); b = norm(b).replace(/ /g, '');\n  if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0;\n  const m = new Map(); for (let i = 0; i < a.length - 1; i++) { const g = a.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); }\n  let hit = 0; for (let i = 0; i < b.length - 1; i++) { const g = b.slice(i, i + 2); const n = m.get(g) || 0; if (n) { m.set(g, n - 1); hit++; } }\n  return (2 * hit) / (a.length + b.length - 2); };\nconst rank = (query, projects) => projects\n  .map(p => ({ p, score: dice(query, p.name) + norm(query).split(' ').filter(t => t && norm(p.name).includes(t)).length * 0.25 }))\n  .sort((x, y) => y.score - x.score);\n\nconst body = $('Webhook get_projects').first().json.body || {};\nconst search = String((body.args || body).search || '').trim();\nconst active = ($input.first().json.projects || []).filter(p => p.active);\nlet list = active, matched = false;\nif (search) { const r = rank(search, active); matched = r.length > 0 && r[0].score >= 0.5; list = r.map(x => x.p); }\nconst projects = list.slice(0, 50).map(p => ({ project_id: p.project_id, name: p.name }));\nreturn [{ json: { response: projects.length\n  ? { success: true, total: active.length, search_matched: matched,\n      suggestions: projects.slice(0, 3).map(p => p.name),\n      instruction: 'Speak at most three project names per turn, starting with suggestions.', projects }\n  : { success: false, error_code: 'NO_PROJECTS', message: 'No active projects are available.' } } }];\n"
+      },
+      "id": "71d47120-aece-4814-8881-eee9a6e762d1",
+      "name": "Shape projects",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "7110252a-f867-4529-90ec-715713ba25ef",
+      "name": "Respond projects",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { response: { success: false, error_code: 'INTERNAL_ERROR',\n  message: 'The system could not load projects right now. Tell the user briefly; do not retry automatically.' } } }];\n"
+      },
+      "id": "8352adc3-3fad-4c81-a004-1fe50a71de42",
+      "name": "Shape error (get_projects)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nudge/create-task",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a5a99e8b-d6c5-40fa-9b63-cff7637fc850",
+      "name": "Webhook create_task",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        528
+      ],
+      "webhookId": "add57233-ffc3-46a9-b516-c2b27cd027af"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "projects"
+        },
+        "options": {}
+      },
+      "id": "5c445ad1-e52b-43e3-9f63-44cf6a6d8f6c",
+      "name": "Read projects (create_task)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -240,
+        528
+      ],
+      "alwaysOutputData": false,
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IAgscZZW3TS2D590",
+          "name": "Google Sheets account 2"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sheet rows -> { projects:[{project_id,name,active}] }. Tolerant of header naming.\nconst pick = (row, keys) => { for (const k of Object.keys(row)) if (keys.includes(k.trim().toLowerCase())) return row[k]; };\nconst ID = ['project id', 'project_id', 'projectid', 'id'];\nconst NAME = ['project name', 'project_name', 'project', 'name'];\nconst STATUS = ['status', 'active', 'state'];\nconst seen = new Set(), projects = [];\nfor (const { json: row } of $input.all()) {\n  const name = String(pick(row || {}, NAME) ?? '').trim();\n  if (!name) continue;\n  const project_id = String(pick(row, ID) ?? '').trim() || name;\n  const status = String(pick(row, STATUS) ?? 'active').trim().toLowerCase();\n  const active = !['completed', 'cancelled', 'canceled', 'inactive', 'archived', 'closed', 'done', 'false', 'no', '0'].includes(status);\n  const key = project_id.toLowerCase(); if (seen.has(key)) continue; seen.add(key);\n  projects.push({ project_id, name, active });\n}\nreturn [{ json: { projects } }];\n"
+      },
+      "id": "cb115f61-4f64-400c-b30b-4958c4dba37f",
+      "name": "Normalize projects (create_task)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst hash = str => { let h1 = 0xdeadbeef, h2 = 0x41c6ce57;\n  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i);\n    h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0'); };\n// Dice similarity on bigrams: tolerant of misheard names (\"cue four campaign\").\nconst dice = (a, b) => { a = norm(a).replace(/ /g, ''); b = norm(b).replace(/ /g, '');\n  if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0;\n  const m = new Map(); for (let i = 0; i < a.length - 1; i++) { const g = a.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); }\n  let hit = 0; for (let i = 0; i < b.length - 1; i++) { const g = b.slice(i, i + 2); const n = m.get(g) || 0; if (n) { m.set(g, n - 1); hit++; } }\n  return (2 * hit) / (a.length + b.length - 2); };\nconst rank = (query, projects) => projects\n  .map(p => ({ p, score: dice(query, p.name) + norm(query).split(' ').filter(t => t && norm(p.name).includes(t)).length * 0.25 }))\n  .sort((x, y) => y.score - x.score);\n\n// Validates the Retell payload and resolves the project. Never trusts the LLM blindly.\nconst fail = (error_code, message, extra = {}) => [{ json: { valid: false, response: { success: false, error_code, message, ...extra } } }];\nconst body = $('Webhook create_task').first().json.body || {};\nconst call = body.call || {};\nconst a = body.args || body;            // supports \"Payload: args only\" too\n\nconst task_description = String(a.task_description || '').replace(/\\s+/g, ' ').trim();\nlet steps = Array.isArray(a.high_level_steps) ? a.high_level_steps : (a.high_level_steps ? String(a.high_level_steps).split(/\\n|;/) : []);\nsteps = steps.map(s => String(s).trim()).filter(Boolean); if (!steps.length) steps = ['Not yet defined'];\nconst minutes = Number(a.estimated_minutes);\nconst reqName = String(a.project_name || a.project_id || '').replace(/\\s+/g, ' ').trim();\nconst wantsCreate = a.create_new_project === true || String(a.create_new_project).toLowerCase() === 'true';\n\nconst errors = [];\nif (!reqName) errors.push('project_name is required');\nif (task_description.length < 3) errors.push('task_description too short');\nif (task_description.length > 500) errors.push('task_description too long');\nif (!Number.isInteger(minutes) || minutes < 1 || minutes > 100000) errors.push('estimated_minutes must be a positive whole number');\nif (errors.length) return fail('VALIDATION_ERROR', errors.join('; '));\n\nconst all = $('Normalize projects (create_task)').first().json.projects || [];\nconst active = all.filter(p => p.active);\nlet project = active.find(p => String(p.project_id) === reqName) || active.find(p => norm(p.name) === norm(reqName));\nlet needs_new_project = false;\n\nif (!project) {\n  const archived = all.find(p => !p.active && norm(p.name) === norm(reqName));\n  if (archived) return fail('PROJECT_ARCHIVED', `\"${archived.name}\" is completed or closed. Ask the user for another project, or whether they want a new one.`);\n  const ranked = rank(reqName, active);\n  const suggestions = ranked.slice(0, 3).map(x => x.p.name);\n  // Near identical name (likely transcription variance): do not create a duplicate, ask the user.\n  if (ranked[0] && ranked[0].score >= 0.85 && wantsCreate)\n    return fail('PROJECT_SIMILAR_EXISTS', `A very similar project \"${ranked[0].p.name}\" already exists. Ask the user if they meant that one before creating a new project.`, { suggestions });\n  if (!wantsCreate)\n    return fail('PROJECT_NOT_FOUND', `No project called \"${reqName}\". Offer up to three of these: ${suggestions.join(', ') || 'none'}. If the user wants a new project, confirm the exact name and call create_task again with create_new_project true.`, { requested_project: reqName, suggestions });\n  if (reqName.length < 2 || reqName.length > 80) return fail('VALIDATION_ERROR', 'New project name must be 2 to 80 characters.');\n  project = { project_id: reqName, name: reqName, active: true };   // sheet has no ID column: name is the key\n  needs_new_project = true;\n}\n\nconst created_at = new Date().toISOString();\nconst idempotency_key = hash([call.call_id || 'no-call', String(project.project_id), norm(task_description)].join('|'));\nreturn [{ json: { valid: true, needs_new_project, idempotency_key, created_at,\n  project, task_description, steps, minutes, call } }];\n"
+      },
+      "id": "04c4f66c-9e18-4c66-ab3c-1cb6fff7c628",
+      "name": "Resolve project and validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "ea50eec2-5803-47e9-95c2-67abb866778f",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "820bcac9-198a-41fb-9de8-0a66f9fe20b8",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        416,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "f5a20cfc-1c52-4873-861b-3a324e0a150f",
+      "name": "Respond invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        640,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "62babcdb-89f4-4343-81a2-ce5162e20097",
+              "leftValue": "={{ $json.needs_new_project }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9fcb09c6-9193-4f52-a4e1-8c132baaae7e",
+      "name": "New project?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Matches the projects tab: Name | Project Owner | Status | Start Date | Due Date\nconst r = $('Resolve project and validate').first().json;\nconst d = new Date(r.created_at);\nconst M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\nconst start = `${String(d.getUTCDate()).padStart(2, '0')}-${M[d.getUTCMonth()]}-${d.getUTCFullYear()}`;\nreturn [{ json: { 'Name': r.project.name, 'Project Owner': '', 'Status': 'Active', 'Start Date': start, 'Due Date': '' } }];\n"
+      },
+      "id": "b2c659f8-2cff-4e89-864c-3faed00ab086",
+      "name": "Build project row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "projects"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Project Owner",
+              "displayName": "Project Owner",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Start Date",
+              "displayName": "Start Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn"
+        }
+      },
+      "id": "d4284f4c-5bfb-44fe-b63d-cfbde2b34b76",
+      "name": "Append project",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1088,
+        288
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IAgscZZW3TS2D590",
+          "name": "Google Sheets account 2"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tasks"
+        },
+        "options": {}
+      },
+      "id": "2677b895-c415-4ade-b6fe-a8bf30dd3285",
+      "name": "Lookup existing task",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1296,
+        432
+      ],
+      "alwaysOutputData": false,
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IAgscZZW3TS2D590",
+          "name": "Google Sheets account 2"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Retell retries failed requests and callers can confirm twice: block duplicates by idempotency key.\nconst r = $('Resolve project and validate').first().json;\nconst existing = $input.all().map(i => i.json || {}).find(row =>\n  String(row['Idempotency Key'] ?? row.idempotency_key ?? '') === r.idempotency_key);\nreturn [{ json: { duplicate: !!existing, existing_task_id: existing ? (existing['Task ID'] || existing.task_id || '') : '' } }];\n"
+      },
+      "id": "ff9deb3a-b4ea-4737-aeca-80b9929c91bb",
+      "name": "Check duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "7c5b6206-33ef-4448-a130-ffa6d98fa117",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "da8637fb-bfb0-4c61-9188-cf87d87433e5",
+      "name": "Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { response: { success: true, duplicate: true, task_id: $input.first().json.existing_task_id,\n  message: 'This task was already saved. Tell the user it is already on the board. Do not save it again.' } } }];\n"
+      },
+      "id": "5d0678e0-19aa-48a5-8d5c-b1223165f648",
+      "name": "Shape duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same schema as the Fireflies pipeline (Tasks tab) plus Project and Idempotency Key.\nconst r = $('Resolve project and validate').first().json;\nconst c = r.call || {};\nconst task_id = 'voice-' + r.idempotency_key.slice(0, 10);\nconst steps = r.steps.map((s, i) => `${i + 1}. ${s}`).join('\\n');\nconst effort = r.minutes >= 60 ? `${+(r.minutes / 60).toFixed(2)} h (${r.minutes} min)` : `${r.minutes} min`;\nreturn [{ json: {\n  'Task ID': task_id,\n  'Meeting ID': c.call_id || '',\n  'Meeting Title': 'Nudge Voice Call',\n  'Meeting Date': c.start_timestamp ? new Date(c.start_timestamp).toISOString() : r.created_at,\n  'Transcript ID': c.call_id || '',\n  'Source': 'Nudge Voice',\n  'Task': r.task_description,\n  'Description': `${r.task_description}\\nSteps:\\n${steps}`,\n  'Owner': '',\n  'Due Date': '',\n  'Priority': 'Unknown',\n  'Estimated Effort': effort,\n  'Evidence': 'Read back to and confirmed by the caller on a Nudge voice call',\n  'AI Confidence': 'High',\n  'Review Status': 'Pending Review',\n  'Task Status': 'Not Started',\n  'Review Notes': r.needs_new_project ? `New project \"${r.project.name}\" created by voice` : '',\n  'Created At': r.created_at,\n  'Project': r.project.name,\n  'Idempotency Key': r.idempotency_key\n} }];\n"
+      },
+      "id": "4e35478b-b91b-47f7-a495-b60f6b8b71e0",
+      "name": "Build task row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "19GT6Seqm_qvE6z0iniA4Oz0lh-pd7IKZ2cEif11K6po"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Tasks"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Task ID",
+              "displayName": "Task ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Meeting ID",
+              "displayName": "Meeting ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Meeting Title",
+              "displayName": "Meeting Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Meeting Date",
+              "displayName": "Meeting Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Transcript ID",
+              "displayName": "Transcript ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Source",
+              "displayName": "Source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Task",
+              "displayName": "Task",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Owner",
+              "displayName": "Owner",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Priority",
+              "displayName": "Priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Estimated Effort",
+              "displayName": "Estimated Effort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Evidence",
+              "displayName": "Evidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "AI Confidence",
+              "displayName": "AI Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Review Status",
+              "displayName": "Review Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Task Status",
+              "displayName": "Task Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Review Notes",
+              "displayName": "Review Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Created At",
+              "displayName": "Created At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn"
+        }
+      },
+      "id": "07bfcde0-dbc1-499c-aadb-30968bc2e3e8",
+      "name": "Append task",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2176,
+        464
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "IAgscZZW3TS2D590",
+          "name": "Google Sheets account 2"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $('Resolve project and validate').first().json;\nconst row = $('Build task row').first().json;\nreturn [{ json: { response: { success: true, duplicate: false, task_id: row['Task ID'],\n  project_name: r.project.name, project_created: r.needs_new_project,\n  message: r.needs_new_project\n    ? `New project \"${r.project.name}\" created and task saved. Confirm both briefly, then ask if there is another task.`\n    : 'Task saved. Confirm briefly and ask if there is another task.' } } }];\n"
+      },
+      "id": "99c2ad8a-2d94-4030-8608-1d1f350f2394",
+      "name": "Shape success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { response: { success: false, error_code: 'INTERNAL_ERROR',\n  message: 'The system could not save right now. Tell the user briefly; do not retry automatically.' } } }];\n"
+      },
+      "id": "514898b3-8bf4-48f7-ba87-073fdca1f7cd",
+      "name": "Shape error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "0c33da9a-8009-4c3a-abeb-d998a4dd27d9",
+      "name": "Respond task",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        368
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook get_projects": {
+      "main": [
+        [
+          {
+            "node": "Read projects (get_projects)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read projects (get_projects)": {
+      "main": [
+        [
+          {
+            "node": "Normalize projects (get_projects)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape error (get_projects)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize projects (get_projects)": {
+      "main": [
+        [
+          {
+            "node": "Shape projects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape projects": {
+      "main": [
+        [
+          {
+            "node": "Respond projects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape error (get_projects)": {
+      "main": [
+        [
+          {
+            "node": "Respond projects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook create_task": {
+      "main": [
+        [
+          {
+            "node": "Read projects (create_task)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read projects (create_task)": {
+      "main": [
+        [
+          {
+            "node": "Normalize projects (create_task)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize projects (create_task)": {
+      "main": [
+        [
+          {
+            "node": "Resolve project and validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve project and validate": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "New project?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New project?": {
+      "main": [
+        [
+          {
+            "node": "Build project row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lookup existing task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build project row": {
+      "main": [
+        [
+          {
+            "node": "Append project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append project": {
+      "main": [
+        [
+          {
+            "node": "Lookup existing task",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup existing task": {
+      "main": [
+        [
+          {
+            "node": "Check duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check duplicate": {
+      "main": [
+        [
+          {
+            "node": "Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Shape duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build task row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape duplicate": {
+      "main": [
+        [
+          {
+            "node": "Respond task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build task row": {
+      "main": [
+        [
+          {
+            "node": "Append task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append task": {
+      "main": [
+        [
+          {
+            "node": "Shape success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Shape error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape success": {
+      "main": [
+        [
+          {
+            "node": "Respond task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape error": {
+      "main": [
+        [
+          {
+            "node": "Respond task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "b2cc5b2a-cb3c-4e4f-b688-72464f927525",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d296afef0654f6ce0e2b0ffa09ed70a9c8ba90b1074db74c9571978da5acf271"
+  },
+  "nodeGroups": [],
+  "id": "EZGy2LtsQkLu5sdM",
+  "tags": []
+}
